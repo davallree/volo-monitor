@@ -1,37 +1,36 @@
-name: Volo Volleyball Monitor
-
+name: Volo Monitor
 on:
   schedule:
-    # Runs every 30 minutes
-    - cron: '*/30 * * * *'
+    - cron: '*/30 * * * *' # Run every 30 mins
   workflow_dispatch:
 
 jobs:
   check-volo:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Download Cache
+        uses: actions/download-artifact@v4
+        with:
+          name: game-cache
+          path: .
+        continue-on-error: true
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.x'
 
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run Monitor
-        env:
-          VOLO_SESSION_HEADERS: ${{ secrets.VOLO_SESSION_HEADERS }}
+      - name: Run monitor
         run: python volo_monitor.py
 
-      - name: Commit and Push Cache
-        run: |
-          git config --global user.name 'VoloBot'
-          git config --global user.email 'bot@github.com'
-          git add known_games.json
-          git commit -m "Update known games cache" || echo "No changes"
-          git push
+      - name: Upload Cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-cache
+          path: known_games.json
+          retention-days: 7
