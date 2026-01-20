@@ -14,7 +14,7 @@ def send_notification(game):
     try:
         message = (
             f"🏐 {game['title']}\n"
-            f"📅 {game['info']}\n"
+            f"📅 {game['details']}\n"
             f"🔗 https://www.volosports.com{game['link']}"
         )
         requests.post(
@@ -26,71 +26,75 @@ def send_notification(game):
                 "Tags": "volleyball,sf"
             }
         )
-        print(f"✅ Alert sent: {game['title']}")
+        print(f"✅ Notification sent: {game['title']}")
     except Exception as e:
         print(f"❌ Notification error: {e}")
 
 def get_game_id(game):
-    """Unique ID based on title, time, and link."""
-    fingerprint = f"{game['title']}-{game['info']}-{game['link']}"
+    """ID based on link and details to catch updates to existing sessions."""
+    fingerprint = f"{game['link']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def scrape_volo():
-    found_games = []
+    games = []
     with sync_playwright() as p:
-        # 1. Use a large window size to force the Desktop layout
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        # Use a desktop viewport to ensure cards aren't hidden in a mobile slider
+        context = browser.new_context(viewport={'width': 1280, 'height': 800})
         page = context.new_page()
         
-        print("🚀 Opening Volo...")
+        print("🚀 Accessing Volo Discover...")
         page.goto(VOLO_URL, wait_until="networkidle")
         
-        # 2. Aggressive Loading: Scroll down and wait 12 seconds
-        # This triggers any 'lazy loading' of cards
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        print("⏳ Waiting for list to populate...")
-        page.wait_for_timeout(12000) 
+        # Wait for the JavaScript to render the icons and images
+        page.wait_for_timeout(10000)
 
-        # 3. Super-Broad Search: Find every single link that points to an event
-        # This ignores card structure entirely and just finds the 'Register' links
-        potential_links = page.query_selector_all('a[href*="/event/"]')
+        # 1. VISUAL PATTERN MATCHING
+        # We look for containers that have a sport image AND at least one icon (SVG)
+        # This is the most consistent way to find the actual game listings.
         
-        for link_el in potential_links:
+        # We find all links that point to an event, then look at their parent containers
+        event_links = page.query_selector_all('a[href*="/event/"]')
+        
+        for link_el in event_links:
             try:
                 href = link_el.get_attribute('href')
                 
-                # Move 'up' the HTML tree from the link to find the containing block
-                # This grabs the text associated with that specific registration link
-                card_container = link_el.evaluate_handle("el => el.closest('div')").as_element()
-                raw_text = card_container.inner_text() if card_container else ""
+                # Move up to the container that holds the title and the icons
+                # Based on the HTML, moving up 3-4 levels gets us the whole card
+                card = link_el.evaluate_handle("el => el.closest('div[style*=\"flex-direction: column\"]') or el.parentElement.parentElement").as_element()
                 
-                # We split the text by lines to find the Title and Date
-                lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
+                if not card: continue
                 
-                if len(lines) >= 2 and "volleyball" in raw_text.lower():
-                    # Usually the first line is the title, second/third is date/time
+                # Check for the icons you mentioned (Clock, Person, Pin)
+                # These are always SVGs in the Volo source code
+                icons = card.query_selector_all('svg')
+                if len(icons) == 0: continue
+                
+                raw_text = card.inner_text().strip()
+                lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+                
+                if len(lines) >= 2:
+                    # The first line is usually the Title (e.g., 'Indoor Volleyball at...')
                     title = lines[0]
-                    # We grab everything else as 'info'
-                    info = " | ".join(lines[1:4])
-                    
-                    found_games.append({
-                        "title": title,
-                        "info": info,
-                        "link": href
-                    })
+                    # The lines near the icons contain the date, time, and spots left
+                    details = " | ".join(lines[1:])
+
+                    # Ensure we aren't picking up the sidebar sport list
+                    if "volleyball" in title.lower() or "volleyball" in details.lower():
+                        if not any(g['link'] == href for g in games):
+                            games.append({
+                                "title": title,
+                                "details": details,
+                                "link": href
+                            })
             except:
                 continue
                 
         browser.close()
     
-    # De-duplicate the list (in case one card had two links)
-    unique_dict = {get_game_id(g): g for g in found_games}
-    print(f"✨ Found {len(unique_dict)} volleyball listings.")
-    return list(unique_dict.values())
+    print(f"✨ Found {len(games)} volleyball event cards.")
+    return games
 
 def main():
     if not os.path.exists(CACHE_FILE):
@@ -111,9 +115,9 @@ def main():
             
     if new_found:
         with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
-        print("✅ Cache updated with new games.")
+        print("Memory updated.")
     else:
-        print("😴 No new games found.")
+        print("No new games detected.")
 
 if __name__ == "__main__":
     main()
