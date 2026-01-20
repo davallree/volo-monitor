@@ -4,46 +4,34 @@ on:
   schedule:
     # Runs every 30 minutes
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Allows manual trigger
+  workflow_dispatch:
 
 jobs:
-  build:
+  check-volo:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: '3.9'
 
       - name: Install dependencies
-        run: |
-          pip install seleniumbase requests
+        run: pip install requests
 
-      - name: Install Chrome and Driver
-        run: |
-          # SeleniumBase handles the binary setup automatically
-          seleniumbase install chromedriver
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable xvfb
-
-      - name: Run Volo Monitor
+      - name: Run Monitor
         env:
-          # If you eventually use secrets for ntfy or other services
-          PYTHONUNBUFFERED: 1
-        run: |
-          # We run through xvfb to simulate a headed browser in a headless environment
-          # This is the most effective way to bypass Cloudflare
-          xvfb-run --auto-servernum python volo_monitor.py
+          VOLO_SESSION_HEADERS: ${{ secrets.VOLO_SESSION_HEADERS }}
+        run: python volo_monitor.py
 
-      - name: Commit and push changes
+      - name: Commit and Push Cache
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name 'VoloBot'
+          git config --global user.email 'bot@github.com'
           git add known_games.json
-          git commit -m "Update known games cache [skip ci]" || echo "No changes to commit"
+          git commit -m "Update known games cache" || echo "No changes"
           git push
