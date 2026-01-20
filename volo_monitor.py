@@ -2,6 +2,7 @@ import os
 import json
 import hashlib
 import requests
+import re
 from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
@@ -31,7 +32,6 @@ def send_notification(game):
         print(f"❌ Notification error: {e}")
 
 def get_game_id(game):
-    """ID based on link and details to catch updates to existing sessions."""
     fingerprint = f"{game['link']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
@@ -39,50 +39,51 @@ def scrape_volo():
     games = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # Use a desktop viewport to ensure cards aren't hidden in a mobile slider
-        context = browser.new_context(viewport={'width': 1280, 'height': 800})
+        # Force a standard desktop view
+        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         
         print("🚀 Accessing Volo Discover...")
         page.goto(VOLO_URL, wait_until="networkidle")
         
-        # Wait for the JavaScript to render the icons and images
-        page.wait_for_timeout(10000)
+        # Volo needs a long time to "hydrate" the React components
+        print("⏳ Waiting for cards to render...")
+        page.wait_for_timeout(15000) 
 
-        # 1. VISUAL PATTERN MATCHING
-        # We look for containers that have a sport image AND at least one icon (SVG)
-        # This is the most consistent way to find the actual game listings.
-        
-        # We find all links that point to an event, then look at their parent containers
+        # 1. Find the "Event Links" first
+        # Every card has a link that goes to /event/
         event_links = page.query_selector_all('a[href*="/event/"]')
         
         for link_el in event_links:
             try:
                 href = link_el.get_attribute('href')
                 
-                # Move up to the container that holds the title and the icons
-                # Based on the HTML, moving up 3-4 levels gets us the whole card
-                card = link_el.evaluate_handle("el => el.closest('div[style*=\"flex-direction: column\"]') or el.parentElement.parentElement").as_element()
-                
-                if not card: continue
-                
-                # Check for the icons you mentioned (Clock, Person, Pin)
-                # These are always SVGs in the Volo source code
-                icons = card.query_selector_all('svg')
-                if len(icons) == 0: continue
-                
-                raw_text = card.inner_text().strip()
-                lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+                # 2. Walk up to the main container for this card
+                # We look for the div that contains the icons (SVGs)
+                # Usually 3-5 levels up from the link
+                container = link_el.evaluate_handle("el => el.closest('div[style*=\"flex-direction: column\"]')").as_element()
+                if not container:
+                    continue
+
+                # 3. Verify it has the "Card DNA" (The icons you saw)
+                icons = container.query_selector_all('svg')
+                if len(icons) < 1:
+                    continue
+
+                # 4. Extract Text
+                raw_text = container.inner_text().strip()
+                lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
                 
                 if len(lines) >= 2:
-                    # The first line is usually the Title (e.g., 'Indoor Volleyball at...')
-                    title = lines[0]
-                    # The lines near the icons contain the date, time, and spots left
-                    details = " | ".join(lines[1:])
+                    # Filter out the generic "Volleyball" label often at the top
+                    title = lines[1] if lines[0].lower() == "volleyball" else lines[0]
+                    # Everything else is the time, place, and spots
+                    details = " | ".join(lines[1:5])
 
-                    # Ensure we aren't picking up the sidebar sport list
-                    if "volleyball" in title.lower() or "volleyball" in details.lower():
-                        if not any(g['link'] == href for g in games):
+                    # Only add if we haven't seen this link in this specific run
+                    if not any(g['link'] == href for g in games):
+                        # Final check: Is it actually volleyball?
+                        if "volleyball" in raw_text.lower():
                             games.append({
                                 "title": title,
                                 "details": details,
@@ -93,7 +94,7 @@ def scrape_volo():
                 
         browser.close()
     
-    print(f"✨ Found {len(games)} volleyball event cards.")
+    print(f"✨ Successfully detected {len(games)} volleyball listings.")
     return games
 
 def main():
@@ -115,9 +116,9 @@ def main():
             
     if new_found:
         with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
-        print("Memory updated.")
+        print("✅ Cache updated.")
     else:
-        print("No new games detected.")
+        print("😴 No new games detected.")
 
 if __name__ == "__main__":
     main()
