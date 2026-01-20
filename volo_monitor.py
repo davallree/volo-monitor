@@ -3,13 +3,13 @@ import json
 import hashlib
 import requests
 import sys
+import re
 
 # --- CONFIGURATION ---
 NTFY_TOPIC = "davallree-sf-volleyball-alerts"
 CACHE_FILE = "known_games.json"
-# The GraphQL endpoint Volo uses
-API_URL = "https://api.volosports.com/v1/graphql"
-TARGET_URL = "https://www.volosports.com/discover?cityName=San%20Francisco&sportNames%5B0%5D=Volleyball"
+BASE_URL = "https://www.volosports.com"
+DISCOVER_URL = f"{BASE_URL}/discover?cityName=San%20Francisco&sportNames%5B0%5D=Volleyball"
 
 def send_notification(game):
     try:
@@ -24,6 +24,22 @@ def get_game_id(game):
     fingerprint = f"{game['link']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
+def extract_games_recursively(obj, games_list):
+    """Deep search for volleyball items in any JSON structure."""
+    if isinstance(obj, dict):
+        if all(k in obj for k in ('name', 'slug')) and 'sportName' in str(obj):
+            if str(obj.get('sportName', '')).lower() == 'volleyball':
+                games_list.append({
+                    "title": obj.get('name'),
+                    "details": f"{obj.get('locationName', 'TBD')} | {obj.get('startTime', 'Check site')}",
+                    "link": f"{BASE_URL}/event/{obj.get('slug')}"
+                })
+        for v in obj.values():
+            extract_games_recursively(v, games_list)
+    elif isinstance(obj, list):
+        for item in obj:
+            extract_games_recursively(item, games_list)
+
 def scrape_volo():
     headers_json = os.environ.get("VOLO_SESSION_HEADERS")
     if not headers_json:
@@ -37,76 +53,42 @@ def scrape_volo():
         print(f"❌ Error parsing headers: {e}")
         sys.exit(1)
 
-    games = []
     s = requests.Session()
+    games = []
 
-    # --- STRATEGY 1: TALK TO THE API DIRECTLY ---
-    print("🚀 Attempting GraphQL API Fetch...")
-    # This is the exact query Volo uses to find games
-    query = {
-        "operationName": "DiscoverPrograms",
-        "variables": {
-            "cityName": "San Francisco",
-            "sportNames": ["Volleyball"],
-            "limit": 50
-        },
-        "query": """
-        query DiscoverPrograms($cityName: String, $sportNames: [String], $limit: Int) {
-          discoverPrograms(cityName: $cityName, sportNames: $sportNames, limit: $limit) {
-            items {
-              name
-              slug
-              startTime
-              locationName
-              sportName
-            }
-          }
-        }
-        """
-    }
-    
+    print("🚀 Step 1: Getting Build ID from main page...")
     try:
-        api_res = s.post(API_URL, headers=headers, json=query, timeout=15)
-        if api_res.status_code == 200:
-            data = api_res.json()
-            items = data.get('data', {}).get('discoverPrograms', {}).get('items', [])
-            if items:
-                for p in items:
-                    games.append({
-                        "title": p.get('name'),
-                        "details": f"{p.get('locationName')} | {p.get('startTime')}",
-                        "link": f"https://www.volosports.com/event/{p.get('slug')}"
-                    })
-                print(f"✅ API Success! Found {len(games)} games.")
-                return games
-    except Exception as e:
-        print(f"⚠️ API Route failed: {e}")
+        res = s.get(DISCOVER_URL, headers=headers, timeout=15)
+        if res.status_code != 200:
+            print(f"🚫 Failed to load main page ({res.status_code})")
+            return []
 
-    # --- STRATEGY 2: FALLBACK TO DEEP PAGE SCAN ---
-    print("🚀 Falling back to Deep Page Scan...")
-    try:
-        res = s.get(TARGET_URL, headers=headers, timeout=15)
-        if "__NEXT_DATA__" in res.text:
-            start_marker = '<script id="__NEXT_DATA__" type="application/json">'
-            start = res.text.find(start_marker) + len(start_marker)
-            end = res.text.find('</script>', start)
-            json_data = json.loads(res.text[start:end])
-            
-            def find_volleyball(obj):
-                if isinstance(obj, dict):
-                    if str(obj.get('sportName', '')).lower() == 'volleyball' and 'slug' in obj:
-                        games.append({
-                            "title": obj.get('name'),
-                            "details": f"{obj.get('locationName')} | {obj.get('startTime')}",
-                            "link": f"https://www.volosports.com/event/{obj.get('slug')}"
-                        })
-                    for v in obj.values(): find_volleyball(v)
-                elif isinstance(obj, list):
-                    for i in obj: find_volleyball(i)
-            
-            find_volleyball(json_data)
+        # Find the buildId in the Next.js script tag
+        match = re.search(r'"buildId":"(.*?)"', res.text)
+        if not match:
+            print("❌ Could not find Next.js Build ID.")
+            return []
+        
+        build_id = match.group(1)
+        print(f"🔓 Found Build ID: {build_id}")
+
+        # Step 2: Hit the actual JSON data endpoint
+        # The URL structure is: /_next/data/{buildId}/discover.json?...
+        data_url = f"{BASE_URL}/_next/data/{build_id}/discover.json?cityName=San+Francisco&sportNames%5B0%5D=Volleyball"
+        print(f"🚀 Step 2: Fetching clean data from {data_url}")
+        
+        data_res = s.get(data_url, headers=headers, timeout=15)
+        if data_res.status_code == 200:
+            extract_games_recursively(data_res.json(), games)
+        else:
+            print(f"⚠️ JSON fetch failed ({data_res.status_code}), falling back to HTML scan...")
+            # If the JSON route fails, scan the HTML blob we already have
+            if "__NEXT_DATA__" in res.text:
+                json_blob = json.loads(re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', res.text).group(1))
+                extract_games_recursively(json_blob, games)
+
     except Exception as e:
-        print(f"❌ Page Scrape failed: {e}")
+        print(f"❌ Scrape failed: {e}")
 
     return games
 
@@ -117,9 +99,8 @@ def main():
         known_ids = json.load(f)
     
     all_found = scrape_volo()
-    
-    # Deduplicate by link
     unique_games = {g['link']: g for g in all_found}.values()
+    
     print(f"🔎 Final Count: {len(unique_games)} volleyball games.")
     
     new_count = 0
