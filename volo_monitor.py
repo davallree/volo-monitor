@@ -31,71 +31,53 @@ def get_game_id(game):
     fingerprint = f"{game['slug']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
-def get_free_proxies():
-    """Scrapes a list of free HTTP proxies to bypass IP-based firewall blocks."""
-    print("🌐 Fetching fresh proxy list...")
-    try:
-        response = requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all")
-        if response.status_code == 200:
-            return response.text.strip().split("\r\n")
-    except:
-        return []
-    return []
-
 def scrape_volo():
     games = []
-    proxies = get_free_proxies()
-    random.shuffle(proxies)
     
-    # We will try up to 5 different proxies if the first ones fail
-    for proxy in proxies[:5]:
-        print(f"🕵️ Attempting scrape with proxy: {proxy}")
+    # UC (Undetected-Chromedriver) mode is the non-legit way to bypass Cloudflare
+    print("🚀 Launching Undetected Driver...")
+    driver = Driver(uc=True, headless=True)
+    
+    try:
+        driver.get(TARGET_URL)
         
-        # UC Mode (Undetected) is key here to bypass Cloudflare
-        driver = Driver(uc=True, headless=True, proxy=proxy)
+        # Human-like interaction: Scroll down slowly to trigger lazy loading
+        print("🖱️ Simulating human scroll...")
+        for _ in range(3):
+            driver.execute_script("window.scrollBy(0, 400);")
+            time.sleep(2)
         
-        try:
-            driver.get(TARGET_URL)
-            # Human-like delay to wait for content and bypass timed challenges
-            time.sleep(10) 
-            
-            # Use SeleniumBase's smart selectors to find the cards
-            # Looking for any div that contains 'ProgramCard' in the class name
-            elements = driver.find_elements("css selector", 'div[class*="ProgramCard"]')
-            
-            if not elements:
-                print("⚠️ No listings found with this proxy. Rotating...")
-                driver.quit()
+        # Wait for the specific card element to appear
+        driver.wait_for_element('div[class*="ProgramCard"]', timeout=20)
+        
+        elements = driver.find_elements("css selector", 'div[class*="ProgramCard"]')
+        print(f"📡 Found {len(elements)} items!")
+
+        for el in elements:
+            try:
+                # Use JS to get text to avoid 'element not visible' issues
+                text = driver.execute_script("return arguments[0].innerText;", el)
+                lines = [l.strip() for l in text.split('\n') if l.strip()]
+                
+                title = lines[0]
+                details = lines[1] if len(lines) > 1 else "Various Dates"
+                
+                link_el = el.find_element("css selector", "a")
+                href = link_el.get_attribute("href")
+                slug = href.split('/')[-1]
+
+                games.append({
+                    "title": title,
+                    "details": details,
+                    "slug": slug
+                })
+            except:
                 continue
-
-            print(f"📡 Found {len(elements)} items!")
-            for el in elements:
-                try:
-                    text = el.text
-                    lines = text.split('\n')
-                    title = lines[0]
-                    # The second line usually contains the location/date info
-                    details = lines[1] if len(lines) > 1 else "No details"
-                    
-                    link_el = el.find_element("css selector", "a")
-                    href = link_el.get_attribute("href")
-                    slug = href.split('/')[-1]
-
-                    games.append({
-                        "title": title,
-                        "details": details,
-                        "slug": slug
-                    })
-                except:
-                    continue
-            
-            # If we found games, we are done
-            driver.quit()
-            break 
-            
-        except Exception as e:
-            print(f"❌ Attempt failed: {e}")
-            driver.quit()
+                
+    except Exception as e:
+        print(f"❌ Scrape failed: {e}")
+    finally:
+        driver.quit()
 
     return games
 
@@ -118,7 +100,9 @@ def main():
             new_found = True
             
     if new_found:
-        with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(known_ids, f)
+        print("✅ Cache updated.")
     else:
         print("😴 No new updates.")
 
