@@ -2,14 +2,15 @@ import os
 import json
 import hashlib
 import requests
+import time
 
 # --- CONFIGURATION ---
 NTFY_TOPIC = "davallree-sf-volleyball-alerts"
 CACHE_FILE = "known_games.json"
-GRAPHQL_URL = "https://api.volosports.com/graphql"
+# Using the main domain's GraphQL gateway to avoid DNS resolution issues
+GRAPHQL_URL = "https://www.volosports.com/api/graphql"
 
 def send_notification(game):
-    """Sends a push notification via ntfy.sh"""
     try:
         message = (
             f"🏐 {game['title']}\n"
@@ -19,24 +20,17 @@ def send_notification(game):
         requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
             data=message.encode('utf-8'),
-            headers={
-                "Title": "New Volo Game Found!",
-                "Priority": "high",
-                "Tags": "volleyball,sf"
-            }
+            headers={"Title": "New Volo Game Found!", "Priority": "high", "Tags": "volleyball,sf"}
         )
         print(f"✅ Notification sent: {game['title']}")
     except Exception as e:
         print(f"❌ Notification error: {e}")
 
 def get_game_id(game):
-    """Creates a unique ID based on the event slug and date string."""
     fingerprint = f"{game['slug']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def scrape_volo():
-    """Hits the Volo GraphQL API directly."""
-    # This is the exact query payload Volo uses for its Discovery page
     payload = {
         "operationName": "searchPrograms",
         "variables": {
@@ -59,7 +53,6 @@ def scrape_volo():
               locationName
               startTime
               registrationStatus
-              __typename
             }
           }
         }"""
@@ -72,37 +65,33 @@ def scrape_volo():
         "Origin": "https://www.volosports.com"
     }
 
-    games = []
-    try:
-        print("🚀 Sending direct request to Volo API...")
-        response = requests.post(GRAPHQL_URL, json=payload, headers=headers, timeout=30)
-        
-        if response.status_code == 403:
-            print("🚫 403 Forbidden: API is blocking the connection. Try reducing run frequency.")
-            return []
+    # Retry logic: Try 3 times with increasing wait times
+    for attempt in range(3):
+        try:
+            print(f"🚀 Requesting data (Attempt {attempt + 1})...")
+            response = requests.post(GRAPHQL_URL, json=payload, headers=headers, timeout=20)
             
-        response.raise_for_status()
-        data = response.json()
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get('data', {}).get('searchPrograms', {}).get('items', [])
+                return [
+                    {
+                        "title": item.get('name'),
+                        "details": f"{item.get('locationName')} | {item.get('startTime')}",
+                        "slug": item.get('slug')
+                    }
+                    for item in items if "volleyball" in item.get('sportName', '').lower()
+                ]
+            else:
+                print(f"⚠️ Server returned {response.status_code}. Retrying...")
+        except Exception as e:
+            print(f"⚠️ Attempt {attempt + 1} failed: {e}")
         
-        items = data.get('data', {}).get('searchPrograms', {}).get('items', [])
-        print(f"📡 API returned {len(items)} total items.")
+        time.sleep(5 * (attempt + 1)) # Wait 5s, then 10s
 
-        for item in items:
-            # Filter for volleyball and meaningful registrations
-            sport = item.get('sportName', '').lower()
-            if "volleyball" in sport:
-                games.append({
-                    "title": item.get('name'),
-                    "details": f"{item.get('locationName')} | {item.get('startTime')}",
-                    "slug": item.get('slug')
-                })
-    except Exception as e:
-        print(f"❌ API Request failed: {e}")
-
-    return games
+    return []
 
 def main():
-    # Initialize cache file
     if not os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, 'w') as f: json.dump([], f)
     
@@ -110,7 +99,7 @@ def main():
         known_ids = json.load(f)
     
     current_games = scrape_volo()
-    print(f"🔎 Found {len(current_games)} active volleyball games.")
+    print(f"🔎 Found {len(current_games)} active volleyball listings.")
     
     new_found = False
     for game in current_games:
@@ -121,11 +110,10 @@ def main():
             new_found = True
             
     if new_found:
-        with open(CACHE_FILE, 'w') as f:
-            json.dump(known_ids, f)
-        print("✅ Cache updated with new games.")
+        with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
+        print("✅ Cache updated.")
     else:
-        print("😴 No new games detected.")
+        print("😴 No new items found.")
 
 if __name__ == "__main__":
     main()
