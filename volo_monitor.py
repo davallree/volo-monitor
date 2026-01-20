@@ -43,17 +43,19 @@ def scrape_with_session():
         sys.exit(1)
     
     try:
-        headers = json.loads(headers_json)
+        raw_headers = json.loads(headers_json)
+        # FIX: Strip HTTP/2 pseudo-headers (starting with ':') which crash the 'requests' library
+        headers = {k: v for k, v in raw_headers.items() if not k.startswith(':')}
     except Exception as e:
         print(f"❌ Error: Could not parse header JSON from secret. {e}")
         sys.exit(1)
 
     games = []
-    print("🚀 Replaying session to Volo Sports...")
+    print("🚀 Replaying session to Volo Sports (Cleaning pseudo-headers)...")
     
     try:
         s = requests.Session()
-        # Request the page using the 'borrowed' browser headers
+        # Request the page using the cleaned browser headers
         response = s.get(TARGET_URL, headers=headers, timeout=20)
         
         if response.status_code == 403:
@@ -74,7 +76,7 @@ def scrape_with_session():
                 # Drilling down into the Next.js page properties for listing items
                 programs = json_data['props']['pageProps']['initialPrograms']['items']
                 for p in programs:
-                    # Double-check it's a Volleyball game
+                    # Filter for Volleyball
                     if "volleyball" in p.get('sportName', '').lower():
                         games.append({
                             "title": p.get('name'),
