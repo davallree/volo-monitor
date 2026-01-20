@@ -3,7 +3,8 @@ import json
 import hashlib
 import requests
 import time
-from playwright.sync_api import sync_playwright
+import random
+from seleniumbase import Driver
 
 # --- CONFIGURATION ---
 NTFY_TOPIC = "davallree-sf-volleyball-alerts"
@@ -30,59 +31,72 @@ def get_game_id(game):
     fingerprint = f"{game['slug']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
+def get_free_proxies():
+    """Scrapes a list of free HTTP proxies to bypass IP-based firewall blocks."""
+    print("🌐 Fetching fresh proxy list...")
+    try:
+        response = requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all")
+        if response.status_code == 200:
+            return response.text.strip().split("\r\n")
+    except:
+        return []
+    return []
+
 def scrape_volo():
     games = []
-    with sync_playwright() as p:
-        print("🚀 Launching stealth browser...")
-        browser = p.chromium.launch(headless=True)
+    proxies = get_free_proxies()
+    random.shuffle(proxies)
+    
+    # We will try up to 5 different proxies if the first ones fail
+    for proxy in proxies[:5]:
+        print(f"🕵️ Attempting scrape with proxy: {proxy}")
         
-        # Create context with a realistic user agent and window size
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 800}
-        )
-        
-        page = context.new_page()
+        # UC Mode (Undetected) is key here to bypass Cloudflare
+        driver = Driver(uc=True, headless=True, proxy=proxy)
         
         try:
-            # Navigate and wait for the page to actually load content
-            page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
+            driver.get(TARGET_URL)
+            # Human-like delay to wait for content and bypass timed challenges
+            time.sleep(10) 
             
-            # Additional wait for React hydration
-            page.wait_for_timeout(5000)
+            # Use SeleniumBase's smart selectors to find the cards
+            # Looking for any div that contains 'ProgramCard' in the class name
+            elements = driver.find_elements("css selector", 'div[class*="ProgramCard"]')
             
-            # Scrape program cards based on the structure in your debug file
-            # We target elements containing "ProgramCard" or similar listing structures
-            cards = page.query_selector_all('div[class*="ProgramCard"], div[class*="listing"]')
-            print(f"📡 Found {len(cards)} potential listings.")
+            if not elements:
+                print("⚠️ No listings found with this proxy. Rotating...")
+                driver.quit()
+                continue
 
-            for card in cards:
+            print(f"📡 Found {len(elements)} items!")
+            for el in elements:
                 try:
-                    title_el = card.query_selector('h3') or card.query_selector('div[class*="title"]')
-                    link_el = card.query_selector('a')
+                    text = el.text
+                    lines = text.split('\n')
+                    title = lines[0]
+                    # The second line usually contains the location/date info
+                    details = lines[1] if len(lines) > 1 else "No details"
                     
-                    if title_el and link_el:
-                        title = title_el.inner_text().strip()
-                        href = link_el.get_attribute('href') or ""
-                        slug = href.split('/')[-1]
-                        
-                        # Grab descriptive text (location/date)
-                        full_text = card.inner_text()
-                        details = full_text.replace(title, "").strip().split('\n')[0]
-                        
-                        games.append({
-                            "title": title,
-                            "details": details,
-                            "slug": slug
-                        })
+                    link_el = el.find_element("css selector", "a")
+                    href = link_el.get_attribute("href")
+                    slug = href.split('/')[-1]
+
+                    games.append({
+                        "title": title,
+                        "details": details,
+                        "slug": slug
+                    })
                 except:
                     continue
-
-        except Exception as e:
-            print(f"❌ Scrape failed: {e}")
-        finally:
-            browser.close()
             
+            # If we found games, we are done
+            driver.quit()
+            break 
+            
+        except Exception as e:
+            print(f"❌ Attempt failed: {e}")
+            driver.quit()
+
     return games
 
 def main():
@@ -93,7 +107,7 @@ def main():
         known_ids = json.load(f)
     
     current_games = scrape_volo()
-    print(f"🔎 Extracted {len(current_games)} items.")
+    print(f"🔎 Final Count: {len(current_games)} items.")
     
     new_found = False
     for game in current_games:
@@ -105,7 +119,6 @@ def main():
             
     if new_found:
         with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
-        print("✅ Cache updated.")
     else:
         print("😴 No new updates.")
 
