@@ -24,15 +24,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Restore previous known_games.json if it exists
-      - name: Download cache
+      - name: Download cache (if exists)
         uses: actions/download-artifact@v4
         with:
           name: known-games
           path: .
         continue-on-error: true
 
-      - name: Ensure cache file exists
+      - name: Ensure cache exists
         run: |
           if [ ! -f known_games.json ]; then
             echo "[]" > known_games.json
@@ -45,7 +44,6 @@ jobs:
           VOLO_SESSION_HEADERS: ${{ secrets.VOLO_SESSION_HEADERS }}
         run: python volo_monitor.py
 
-      # Save updated known_games.json
       - name: Upload cache
         uses: actions/upload-artifact@v4
         with:
