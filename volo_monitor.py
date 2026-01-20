@@ -2,80 +2,115 @@ import os
 import json
 import hashlib
 import requests
-from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
-VOLO_URL = "https://www.volosports.com/discover?cityName=San%20Francisco&subView=DAILY&view=SPORTS&sportNames%5B0%5D=Volleyball"
+NTFY_TOPIC = "davallree-sf-volleyball-alerts"
 CACHE_FILE = "known_games.json"
-NTFY_TOPIC = "davallree-sf-volleyball-alerts" 
+GRAPHQL_URL = "https://api.volosports.com/graphql"
 
 def send_notification(game):
+    """Sends a push notification via ntfy.sh"""
     try:
-        message = f"🏐 {game['title']}\n📅 {game['details']}\n🔗 https://www.volosports.com{game['link']}"
-        requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=message.encode('utf-8'),
-                      headers={"Title": "New Volo Game Found!", "Priority": "high", "Tags": "volleyball,sf"})
+        message = (
+            f"🏐 {game['title']}\n"
+            f"📅 {game['details']}\n"
+            f"🔗 https://www.volosports.com/event/{game['slug']}"
+        )
+        requests.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=message.encode('utf-8'),
+            headers={
+                "Title": "New Volo Game Found!",
+                "Priority": "high",
+                "Tags": "volleyball,sf"
+            }
+        )
         print(f"✅ Notification sent: {game['title']}")
     except Exception as e:
         print(f"❌ Notification error: {e}")
 
 def get_game_id(game):
-    return hashlib.md5(f"{game['link']}-{game['details']}".encode()).hexdigest()
+    """Creates a unique ID based on the event slug and date string."""
+    fingerprint = f"{game['slug']}-{game['details']}"
+    return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def scrape_volo():
+    """Hits the Volo GraphQL API directly."""
+    # This is the exact query payload Volo uses for its Discovery page
+    payload = {
+        "operationName": "searchPrograms",
+        "variables": {
+            "input": {
+                "cityName": "San Francisco",
+                "sportNames": ["Volleyball"],
+                "view": "SPORTS",
+                "subView": "DAILY",
+                "limit": 50,
+                "offset": 0
+            }
+        },
+        "query": """query searchPrograms($input: SearchProgramsInput!) {
+          searchPrograms(input: $input) {
+            items {
+              id
+              name
+              slug
+              sportName
+              locationName
+              startTime
+              registrationStatus
+              __typename
+            }
+          }
+        }"""
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://www.volosports.com/discover",
+        "Origin": "https://www.volosports.com"
+    }
+
     games = []
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        # Use a very generic, high-trust User Agent
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
-
-        # INTERNAL DATA CAPTURE
-        # We listen for the specific background request Volo makes to load the list
-        def handle_response(response):
-            if "graphql" in response.url or "discover" in response.url:
-                try:
-                    data = response.json()
-                    # Navigating Volo's JSON structure for 'program' listings
-                    items = data.get('data', {}).get('searchPrograms', {}).get('items', [])
-                    for item in items:
-                        if "volleyball" in item.get('sportName', '').lower():
-                            games.append({
-                                "title": item.get('name', 'Volleyball Game'),
-                                "details": f"{item.get('locationName', 'SF')} | {item.get('startTime', '')}",
-                                "link": f"/event/{item.get('slug', '')}"
-                            })
-                except:
-                    pass
-
-        page.on("response", handle_response)
-
-        print("🚀 Requesting data from Volo API...")
-        # Navigate to the page to trigger the background API calls
-        page.goto(VOLO_URL, wait_until="networkidle", timeout=60000)
+    try:
+        print("🚀 Sending direct request to Volo API...")
+        response = requests.post(GRAPHQL_URL, json=payload, headers=headers, timeout=30)
         
-        # Give it a bit extra time to finish background API calls
-        page.wait_for_timeout(5000)
-        browser.close()
+        if response.status_code == 403:
+            print("🚫 403 Forbidden: API is blocking the connection. Try reducing run frequency.")
+            return []
+            
+        response.raise_for_status()
+        data = response.json()
+        
+        items = data.get('data', {}).get('searchPrograms', {}).get('items', [])
+        print(f"📡 API returned {len(items)} total items.")
+
+        for item in items:
+            # Filter for volleyball and meaningful registrations
+            sport = item.get('sportName', '').lower()
+            if "volleyball" in sport:
+                games.append({
+                    "title": item.get('name'),
+                    "details": f"{item.get('locationName')} | {item.get('startTime')}",
+                    "slug": item.get('slug')
+                })
+    except Exception as e:
+        print(f"❌ API Request failed: {e}")
 
     return games
 
 def main():
+    # Initialize cache file
     if not os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, 'w') as f: json.dump([], f)
+    
     with open(CACHE_FILE, 'r') as f:
         known_ids = json.load(f)
     
     current_games = scrape_volo()
-    
-    # FALLBACK: If API interception failed, try a final forced-wait scan
-    if not current_games:
-        print("⚠️ API capture empty, likely blocked. No games found.")
-        return
-
-    print(f"🔎 Found {len(current_games)} games via API.")
+    print(f"🔎 Found {len(current_games)} active volleyball games.")
     
     new_found = False
     for game in current_games:
@@ -86,10 +121,11 @@ def main():
             new_found = True
             
     if new_found:
-        with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
-        print("✅ Memory updated.")
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(known_ids, f)
+        print("✅ Cache updated with new games.")
     else:
-        print("😴 No new updates.")
+        print("😴 No new games detected.")
 
 if __name__ == "__main__":
     main()
