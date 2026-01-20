@@ -2,8 +2,7 @@ import os
 import json
 import hashlib
 import requests
-import time
-from seleniumbase import SB
+import sys
 
 # --- CONFIGURATION ---
 NTFY_TOPIC = "davallree-sf-volleyball-alerts"
@@ -16,95 +15,90 @@ def send_notification(game):
         message = (
             f"🏐 {game['title']}\n"
             f"📅 {game['details']}\n"
-            f"🔗 https://www.volosports.com/event/{game['slug']}"
+            f"🔗 {game['link']}"
         )
         requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
             data=message.encode('utf-8'),
-            headers={"Title": "New Volo Game Found!", "Priority": "high", "Tags": "volleyball,sf"}
+            headers={
+                "Title": "New Volo Game Found!",
+                "Priority": "high", 
+                "Tags": "volleyball,sf"
+            }
         )
         print(f"✅ Notification sent: {game['title']}")
     except Exception as e:
         print(f"❌ Notification error: {e}")
 
 def get_game_id(game):
-    """Creates a unique ID based on the slug and details."""
-    fingerprint = f"{game['slug']}-{game['details']}"
+    """Creates a unique hash for a game to prevent duplicate alerts."""
+    fingerprint = f"{game['link']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
-def scrape_volo():
-    """Scrapes Volo using SeleniumBase CDP Mode for maximum stealth."""
-    games = []
+def scrape_with_session():
+    """Uses session headers from GitHub secrets to bypass Cloudflare."""
+    headers_json = os.environ.get("VOLO_SESSION_HEADERS")
+    if not headers_json:
+        print("❌ Error: VOLO_SESSION_HEADERS secret is missing!")
+        sys.exit(1)
     
-    # uc=True enables Undetected-Chromedriver
-    # test=True helps with internal bypasses
-    with SB(uc=True, incognito=True, test=True) as sb:
-        try:
-            print(f"🚀 Opening {TARGET_URL} in CDP Mode...")
-            sb.activate_cdp_mode(TARGET_URL)
-            
-            # Handle potential Cloudflare Turnstile/Captcha challenges
-            print("🛡️ Checking for bot challenges...")
-            sb.sleep(5)
-            sb.uc_gui_click_captcha() 
-            
-            # Allow time for React content to populate
-            print("⌛ Waiting for page content...")
-            sb.sleep(12)
-            
-            # Scroll slightly to trigger any lazy-loaded cards
-            sb.execute_script("window.scrollBy(0, 800);")
-            sb.sleep(2)
+    try:
+        headers = json.loads(headers_json)
+    except Exception as e:
+        print(f"❌ Error: Could not parse header JSON from secret. {e}")
+        sys.exit(1)
 
-            # Broad selector: Look for cards or anything with 'program' in data/class
-            elements = sb.find_elements('div[class*="ProgramCard"], [data-testid*="program"]')
+    games = []
+    print("🚀 Replaying session to Volo Sports...")
+    
+    try:
+        s = requests.Session()
+        # Request the page using the 'borrowed' browser headers
+        response = s.get(TARGET_URL, headers=headers, timeout=20)
+        
+        if response.status_code == 403:
+            print("🚫 403 Forbidden. Your session headers/cookies may have expired.")
+            return []
             
-            if not elements:
-                print("⚠️ No listings found. Saving source for debugging...")
-                with open("error_debug.html", "w", encoding="utf-8") as f:
-                    f.write(sb.get_page_source())
-                return []
-
-            print(f"📡 Found {len(elements)} items!")
-
-            for el in elements:
-                try:
-                    text = el.text
-                    lines = [line.strip() for line in text.split('\n') if line.strip()]
-                    
-                    if not lines: continue
-                    
-                    # Usually: [0] = Sport, [1] = Title, [2] = Location/Date
-                    # Or: [0] = Title if 'Volleyball' is filtered out
-                    title = lines[1] if lines[0].upper() == "VOLLEYBALL" and len(lines) > 1 else lines[0]
-                    details = lines[2] if len(lines) > 2 else (lines[1] if len(lines) > 1 else "Details on site")
-                    
-                    link_el = el.find_element("css selector", "a")
-                    href = link_el.get_attribute("href")
-                    slug = href.split('/')[-1] if href else "unknown"
-
-                    games.append({
-                        "title": title,
-                        "details": details,
-                        "slug": slug
-                    })
-                except:
-                    continue
-                    
-        except Exception as e:
-            print(f"❌ Scrape failed: {e}")
+        print(f"✅ Access Granted! (Status: {response.status_code})")
+        
+        # Next.js apps embed their initial state in a JSON blob inside a script tag
+        if "__NEXT_DATA__" in response.text:
+            print("🔓 Found Next.js Data Blob! Extracting precise data...")
+            start_str = '<script id="__NEXT_DATA__" type="application/json">'
+            start = response.text.find(start_str) + len(start_str)
+            end = response.text.find('</script>', start)
+            json_data = json.loads(response.text[start:end])
             
+            try:
+                # Drilling down into the Next.js page properties for listing items
+                programs = json_data['props']['pageProps']['initialPrograms']['items']
+                for p in programs:
+                    # Double-check it's a Volleyball game
+                    if "volleyball" in p.get('sportName', '').lower():
+                        games.append({
+                            "title": p.get('name'),
+                            "details": f"{p.get('locationName')} | {p.get('startTime')}",
+                            "link": f"https://www.volosports.com/event/{p.get('slug')}"
+                        })
+            except KeyError:
+                print("⚠️ Warning: Site structure changed. Could not find 'initialPrograms'.")
+
+    except Exception as e:
+        print(f"❌ Network request failed: {e}")
+
     return games
 
 def main():
+    # Initialize cache file if it doesn't exist
     if not os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, 'w') as f: json.dump([], f)
     
     with open(CACHE_FILE, 'r') as f:
         known_ids = json.load(f)
     
-    current_games = scrape_volo()
-    print(f"🔎 Final Count: {len(current_games)} items.")
+    current_games = scrape_with_session()
+    print(f"🔎 Found {len(current_games)} active games.")
     
     new_found = False
     for game in current_games:
@@ -117,9 +111,9 @@ def main():
     if new_found:
         with open(CACHE_FILE, 'w') as f:
             json.dump(known_ids, f)
-        print("✅ Cache updated.")
+        print("✅ Cache updated with new games.")
     else:
-        print("😴 No new updates.")
+        print("😴 No new updates found.")
 
 if __name__ == "__main__":
     main()
