@@ -3,8 +3,7 @@ import json
 import hashlib
 import requests
 import time
-import random
-from seleniumbase import Driver
+from seleniumbase import SB
 
 # --- CONFIGURATION ---
 NTFY_TOPIC = "davallree-sf-volleyball-alerts"
@@ -12,6 +11,7 @@ CACHE_FILE = "known_games.json"
 TARGET_URL = "https://www.volosports.com/discover?cityName=San%20Francisco&sportNames%5B0%5D=Volleyball"
 
 def send_notification(game):
+    """Sends a push notification via ntfy.sh"""
     try:
         message = (
             f"🏐 {game['title']}\n"
@@ -28,57 +28,72 @@ def send_notification(game):
         print(f"❌ Notification error: {e}")
 
 def get_game_id(game):
+    """Creates a unique ID based on the slug and details."""
     fingerprint = f"{game['slug']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def scrape_volo():
+    """Scrapes Volo using SeleniumBase CDP Mode for maximum stealth."""
     games = []
     
-    # UC (Undetected-Chromedriver) mode is the non-legit way to bypass Cloudflare
-    print("🚀 Launching Undetected Driver...")
-    driver = Driver(uc=True, headless=True)
-    
-    try:
-        driver.get(TARGET_URL)
-        
-        # Human-like interaction: Scroll down slowly to trigger lazy loading
-        print("🖱️ Simulating human scroll...")
-        for _ in range(3):
-            driver.execute_script("window.scrollBy(0, 400);")
-            time.sleep(2)
-        
-        # Wait for the specific card element to appear
-        driver.wait_for_element('div[class*="ProgramCard"]', timeout=20)
-        
-        elements = driver.find_elements("css selector", 'div[class*="ProgramCard"]')
-        print(f"📡 Found {len(elements)} items!")
+    # uc=True enables Undetected-Chromedriver
+    # test=True helps with internal bypasses
+    with SB(uc=True, incognito=True, test=True) as sb:
+        try:
+            print(f"🚀 Opening {TARGET_URL} in CDP Mode...")
+            sb.activate_cdp_mode(TARGET_URL)
+            
+            # Handle potential Cloudflare Turnstile/Captcha challenges
+            print("🛡️ Checking for bot challenges...")
+            sb.sleep(5)
+            sb.uc_gui_click_captcha() 
+            
+            # Allow time for React content to populate
+            print("⌛ Waiting for page content...")
+            sb.sleep(12)
+            
+            # Scroll slightly to trigger any lazy-loaded cards
+            sb.execute_script("window.scrollBy(0, 800);")
+            sb.sleep(2)
 
-        for el in elements:
-            try:
-                # Use JS to get text to avoid 'element not visible' issues
-                text = driver.execute_script("return arguments[0].innerText;", el)
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
-                
-                title = lines[0]
-                details = lines[1] if len(lines) > 1 else "Various Dates"
-                
-                link_el = el.find_element("css selector", "a")
-                href = link_el.get_attribute("href")
-                slug = href.split('/')[-1]
+            # Broad selector: Look for cards or anything with 'program' in data/class
+            elements = sb.find_elements('div[class*="ProgramCard"], [data-testid*="program"]')
+            
+            if not elements:
+                print("⚠️ No listings found. Saving source for debugging...")
+                with open("error_debug.html", "w", encoding="utf-8") as f:
+                    f.write(sb.get_page_source())
+                return []
 
-                games.append({
-                    "title": title,
-                    "details": details,
-                    "slug": slug
-                })
-            except:
-                continue
-                
-    except Exception as e:
-        print(f"❌ Scrape failed: {e}")
-    finally:
-        driver.quit()
+            print(f"📡 Found {len(elements)} items!")
 
+            for el in elements:
+                try:
+                    text = el.text
+                    lines = [line.strip() for line in text.split('\n') if line.strip()]
+                    
+                    if not lines: continue
+                    
+                    # Usually: [0] = Sport, [1] = Title, [2] = Location/Date
+                    # Or: [0] = Title if 'Volleyball' is filtered out
+                    title = lines[1] if lines[0].upper() == "VOLLEYBALL" and len(lines) > 1 else lines[0]
+                    details = lines[2] if len(lines) > 2 else (lines[1] if len(lines) > 1 else "Details on site")
+                    
+                    link_el = el.find_element("css selector", "a")
+                    href = link_el.get_attribute("href")
+                    slug = href.split('/')[-1] if href else "unknown"
+
+                    games.append({
+                        "title": title,
+                        "details": details,
+                        "slug": slug
+                    })
+                except:
+                    continue
+                    
+        except Exception as e:
+            print(f"❌ Scrape failed: {e}")
+            
     return games
 
 def main():
