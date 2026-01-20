@@ -24,11 +24,7 @@ def send_ntfy(message, title="Volo Monitor", priority="default", tags="volleybal
         r = requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
             data=message.encode("utf-8"),
-            headers={
-                "Title": title,
-                "Priority": priority,
-                "Tags": tags,
-            },
+            headers={"Title": title, "Priority": priority, "Tags": tags},
             timeout=10,
         )
         print(f"📣 ntfy status: {r.status_code}")
@@ -43,7 +39,6 @@ def get_game_id(item):
     uid = item.get("game_id") or item.get("league_id") or item.get("_id")
     if uid:
         return str(uid)
-
     fingerprint = f"{item.get('event_start_date')}-{item.get('event_start_time_str')}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
@@ -70,7 +65,6 @@ def fetch_graphql_data():
         "Accept": "*/*",
     }
 
-    # Optional HAR headers (cleaned)
     raw = os.getenv("VOLO_SESSION_HEADERS")
     if raw:
         try:
@@ -85,13 +79,8 @@ def fetch_graphql_data():
     sf = ZoneInfo("America/Los_Angeles")
     now_utc = datetime.now(timezone.utc)
 
-    sf_today_midnight = (
-        datetime.now(sf)
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-    )
-    sf_yesterday_midnight_utc = (
-        sf_today_midnight - timedelta(days=1)
-    ).astimezone(timezone.utc)
+    sf_today_midnight = datetime.now(sf).replace(hour=0, minute=0, second=0, microsecond=0)
+    sf_yesterday_midnight_utc = (sf_today_midnight - timedelta(days=1)).astimezone(timezone.utc)
 
     where = {
         "_or": [
@@ -124,20 +113,12 @@ def fetch_graphql_data():
 
     payload = {
         "operationName": "DiscoverDaily",
-        "variables": {
-            "limit": 15,
-            "offset": 0,
-            "where": where,
-        },
+        "variables": {"limit": 15, "offset": 0, "where": where},
         "query": """
 query DiscoverDaily($where: discover_daily_bool_exp!, $limit: Int, $offset: Int) {
   discover_daily(
     where: $where
-    order_by: [
-      {event_start_date: asc},
-      {event_start_time_str: asc},
-      {_id: asc}
-    ]
+    order_by: [{event_start_date: asc}, {event_start_time_str: asc}, {_id: asc}]
     limit: $limit
     offset: $offset
   ) {
@@ -171,10 +152,9 @@ query DiscoverDaily($where: discover_daily_bool_exp!, $limit: Int, $offset: Int)
         if r.status_code == 200:
             data = r.json().get("data", {}).get("discover_daily", [])
             return "SUCCESS", data
-        elif r.status_code in (403, 429):
+        if r.status_code in (403, 429):
             return "BLOCKED", r.status_code
-        else:
-            return "ERROR", f"{r.status_code}: {r.text[:200]}"
+        return "ERROR", f"{r.status_code}: {r.text[:200]}"
     except Exception as e:
         return "ERROR", str(e)
 
@@ -183,8 +163,9 @@ query DiscoverDaily($where: discover_daily_bool_exp!, $limit: Int, $offset: Int)
 def main():
     if not NTFY_TOPIC:
         print("❌ NTFY_TOPIC not set")
-        return
+        raise SystemExit(2)
 
+    # Load cache
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -215,7 +196,7 @@ def main():
             tags="warning",
         )
         print(f"❌ Error: {result}")
-        return
+        raise SystemExit(1)
 
     new_count = 0
 
@@ -225,13 +206,13 @@ def main():
             continue
 
         if item.get("game"):
-            g = item["game"]
+            g = item["game"] or {}
             venue = g.get("venueByVenue") or {}
             title = "Volleyball (Drop-in)"
             when = g.get("start_time")
             spots = (g.get("drop_in_capacity") or {}).get("total_available_spots")
         else:
-            l = item["league"]
+            l = item.get("league") or {}
             venue = l.get("venueByVenue") or {}
             title = l.get("display_name") or l.get("name") or "Volleyball League"
             when = l.get("start_date")
@@ -250,6 +231,7 @@ def main():
         known_ids.add(gid)
         new_count += 1
 
+    # Always write cache
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(known_ids), f)
 
