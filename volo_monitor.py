@@ -32,59 +32,55 @@ def send_notification(game):
         print(f"❌ Notification error: {e}")
 
 def get_game_id(game):
+    """Creates a unique ID so we don't notify twice."""
     fingerprint = f"{game['link']}-{game['details']}"
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def scrape_volo():
-    games = []
+    found_games = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # Force a standard desktop view
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
+        # Use a real browser size
+        context = browser.new_context(viewport={'width': 1280, 'height': 1000})
         page = context.new_page()
         
-        print("🚀 Accessing Volo Discover...")
+        print("🚀 Opening Volo Discover...")
         page.goto(VOLO_URL, wait_until="networkidle")
         
-        # Volo needs a long time to "hydrate" the React components
-        print("⏳ Waiting for cards to render...")
-        page.wait_for_timeout(15000) 
+        # Give React 15 seconds to fully load the cards and icons
+        print("⏳ Waiting for cards to appear...")
+        page.wait_for_timeout(15000)
 
-        # 1. Find the "Event Links" first
-        # Every card has a link that goes to /event/
+        # FIND THE CARDS: In your HTML, every card has an <a> link containing "/event/"
+        # We find those links and then look at the text around them.
         event_links = page.query_selector_all('a[href*="/event/"]')
         
         for link_el in event_links:
             try:
                 href = link_el.get_attribute('href')
                 
-                # 2. Walk up to the main container for this card
-                # We look for the div that contains the icons (SVGs)
-                # Usually 3-5 levels up from the link
+                # Move up the HTML tree to find the box containing the text and icons
+                # Based on your HTML, 5 levels up gets the whole card
                 container = link_el.evaluate_handle("el => el.closest('div[style*=\"flex-direction: column\"]')").as_element()
-                if not container:
-                    continue
-
-                # 3. Verify it has the "Card DNA" (The icons you saw)
-                icons = container.query_selector_all('svg')
-                if len(icons) < 1:
-                    continue
-
-                # 4. Extract Text
-                raw_text = container.inner_text().strip()
-                lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
                 
-                if len(lines) >= 2:
-                    # Filter out the generic "Volleyball" label often at the top
-                    title = lines[1] if lines[0].lower() == "volleyball" else lines[0]
-                    # Everything else is the time, place, and spots
-                    details = " | ".join(lines[1:5])
+                if container:
+                    # Check for the icons (SVGs) you mentioned
+                    icons = container.query_selector_all('svg')
+                    # A real game card must have icons (time, person, location)
+                    if len(icons) < 1: continue
+                    
+                    raw_text = container.inner_text().strip()
+                    lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
 
-                    # Only add if we haven't seen this link in this specific run
-                    if not any(g['link'] == href for g in games):
-                        # Final check: Is it actually volleyball?
-                        if "volleyball" in raw_text.lower():
-                            games.append({
+                    if len(lines) >= 2:
+                        # Skip the generic "VOLLEYBALL" header if it's the first line
+                        title = lines[1] if lines[0].upper() == "VOLLEYBALL" else lines[0]
+                        # Capture the date, time, and location lines
+                        details = " | ".join(lines[1:5])
+
+                        # Verify this specific link hasn't been added in this run
+                        if not any(g['link'] == href for g in found_games):
+                            found_games.append({
                                 "title": title,
                                 "details": details,
                                 "link": href
@@ -94,8 +90,8 @@ def scrape_volo():
                 
         browser.close()
     
-    print(f"✨ Successfully detected {len(games)} volleyball listings.")
-    return games
+    print(f"✨ Found {len(found_games)} volleyball listings.")
+    return found_games
 
 def main():
     if not os.path.exists(CACHE_FILE):
@@ -116,9 +112,4 @@ def main():
             
     if new_found:
         with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
-        print("✅ Cache updated.")
-    else:
-        print("😴 No new games detected.")
-
-if __name__ == "__main__":
-    main()
+        print("✅ Success
