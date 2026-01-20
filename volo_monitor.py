@@ -7,8 +7,9 @@ import time
 # --- CONFIGURATION ---
 NTFY_TOPIC = "davallree-sf-volleyball-alerts"
 CACHE_FILE = "known_games.json"
-# Using the main domain's GraphQL gateway to avoid DNS resolution issues
-GRAPHQL_URL = "https://www.volosports.com/api/graphql"
+
+# We use the Next.js internal data URL which is often less protected than the API
+DATA_URL = "https://www.volosports.com/_next/data/latest/discover.json"
 
 def send_notification(game):
     try:
@@ -31,63 +32,48 @@ def get_game_id(game):
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def scrape_volo():
-    payload = {
-        "operationName": "searchPrograms",
-        "variables": {
-            "input": {
-                "cityName": "San Francisco",
-                "sportNames": ["Volleyball"],
-                "view": "SPORTS",
-                "subView": "DAILY",
-                "limit": 50,
-                "offset": 0
-            }
-        },
-        "query": """query searchPrograms($input: SearchProgramsInput!) {
-          searchPrograms(input: $input) {
-            items {
-              id
-              name
-              slug
-              sportName
-              locationName
-              startTime
-              registrationStatus
-            }
-          }
-        }"""
+    # Constructing the exact query params used by the frontend
+    params = {
+        "cityName": "San Francisco",
+        "subView": "DAILY",
+        "view": "SPORTS",
+        "sportNames[0]": "Volleyball"
     }
 
     headers = {
-        "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.volosports.com/discover",
-        "Origin": "https://www.volosports.com"
+        "Accept": "application/json",
+        "x-nextjs-data": "1"  # Tells the server to return JSON, not HTML
     }
 
-    # Retry logic: Try 3 times with increasing wait times
     for attempt in range(3):
         try:
-            print(f"🚀 Requesting data (Attempt {attempt + 1})...")
-            response = requests.post(GRAPHQL_URL, json=payload, headers=headers, timeout=20)
+            print(f"🚀 Fetching Next.js data (Attempt {attempt + 1})...")
+            response = requests.get(DATA_URL, params=params, headers=headers, timeout=20)
             
             if response.status_code == 200:
                 data = response.json()
-                items = data.get('data', {}).get('searchPrograms', {}).get('items', [])
+                # Next.js structure usually puts data in 'pageProps'
+                items = data.get('pageProps', {}).get('initialPrograms', {}).get('items', [])
+                
+                # Fallback check for different JSON structure
+                if not items:
+                    items = data.get('data', {}).get('searchPrograms', {}).get('items', [])
+
                 return [
                     {
                         "title": item.get('name'),
                         "details": f"{item.get('locationName')} | {item.get('startTime')}",
                         "slug": item.get('slug')
                     }
-                    for item in items if "volleyball" in item.get('sportName', '').lower()
+                    for item in items if item.get('slug')
                 ]
             else:
-                print(f"⚠️ Server returned {response.status_code}. Retrying...")
+                print(f"⚠️ Status {response.status_code}. The site might be blocking the request.")
         except Exception as e:
-            print(f"⚠️ Attempt {attempt + 1} failed: {e}")
+            print(f"⚠️ Request failed: {e}")
         
-        time.sleep(5 * (attempt + 1)) # Wait 5s, then 10s
+        time.sleep(5)
 
     return []
 
@@ -99,7 +85,7 @@ def main():
         known_ids = json.load(f)
     
     current_games = scrape_volo()
-    print(f"🔎 Found {len(current_games)} active volleyball listings.")
+    print(f"🔎 Found {len(current_games)} volleyball listings.")
     
     new_found = False
     for game in current_games:
@@ -113,7 +99,7 @@ def main():
         with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
         print("✅ Cache updated.")
     else:
-        print("😴 No new items found.")
+        print("😴 No new updates.")
 
 if __name__ == "__main__":
     main()
