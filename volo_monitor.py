@@ -5,76 +5,93 @@ import requests
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
-# --- CONFIGURATION ---
-# Prefer env var in Actions; fall back to your current topic.
-NTFY_TOPIC = os.getenv("NTFY_TOPIC", "davallree-sf-volleyball-alerts")
-CACHE_FILE = os.getenv("CACHE_FILE", "known_games.json")
+# ---------------- CONFIG ----------------
 
-# IMPORTANT: the HAR shows the working endpoint is on volosports.com (no www)
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
+CACHE_FILE = "known_games.json"
+
 API_URL = "https://volosports.com/hapi/v1/graphql"
 
 DISCOVER_URL = (
-    "https://www.volosports.com/discover?cityName=San%20Francisco&sportNames%5B0%5D=Volleyball"
+    "https://www.volosports.com/discover"
+    "?cityName=San%20Francisco&sportNames%5B0%5D=Volleyball"
 )
+
+# ---------------- NTfy ----------------
 
 def send_ntfy(message, title="Volo Monitor", priority="default", tags="volleyball"):
     try:
-        requests.post(
+        r = requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=message.encode('utf-8'),
-            headers={"Title": title, "Priority": priority, "Tags": tags},
-            timeout=10
+            data=message.encode("utf-8"),
+            headers={
+                "Title": title,
+                "Priority": priority,
+                "Tags": tags,
+            },
+            timeout=10,
         )
+        print(f"📣 ntfy status: {r.status_code}")
+        if r.status_code >= 400:
+            print(f"📣 ntfy error body: {r.text[:200]}")
     except Exception as e:
-        print(f"❌ Failed to send ntfy: {e}")
+        print(f"❌ ntfy exception: {e}")
+
+# ---------------- HELPERS ----------------
 
 def get_game_id(item):
-    # GraphQL payloads from DiscoverDaily use game_id / league_id / _id
-    uid = item.get('game_id') or item.get('league_id') or item.get('_id')
-    if not uid:
-        fingerprint = f"{item.get('event_start_date')}-{item.get('event_start_time_str')}"
-        return hashlib.md5(fingerprint.encode()).hexdigest()
-    return str(uid)
+    uid = item.get("game_id") or item.get("league_id") or item.get("_id")
+    if uid:
+        return str(uid)
+
+    fingerprint = f"{item.get('event_start_date')}-{item.get('event_start_time_str')}"
+    return hashlib.md5(fingerprint.encode()).hexdigest()
+
+def iso_z(dt: datetime) -> str:
+    return (
+        dt.astimezone(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+# ---------------- GRAPHQL ----------------
 
 def fetch_graphql_data():
-    # Minimal but realistic headers; do not replay HTTP/2 pseudo-headers.
     headers = {
         "Content-Type": "application/json",
         "Origin": "https://www.volosports.com",
         "Referer": "https://www.volosports.com/",
         "User-Agent": os.getenv(
             "VOLO_USER_AGENT",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36",
         ),
         "Accept": "*/*",
     }
 
-    # Optional: merge in headers exported from HAR (VOLO_SESSION_HEADERS)
-    # This can help on some networks, but is not required per the captured HAR.
+    # Optional HAR headers (cleaned)
     raw = os.getenv("VOLO_SESSION_HEADERS")
     if raw:
         try:
             extra = json.loads(raw)
-            # Strip invalid keys (requests rejects some / they cause weird behavior)
-            for k, v in list(extra.items()):
-                if k.startswith(":"):
+            for k in list(extra.keys()):
+                if k.startswith(":") or k.lower() in ("content-length", "host"):
                     extra.pop(k, None)
-            # Avoid clobbering our known-good basics
-            for k in ("content-length", "host"):
-                extra.pop(k, None)
             headers.update(extra)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ Failed to parse VOLO_SESSION_HEADERS: {e}")
 
-    # Compute time windows like the browser does.
-    # League filter starts from "yesterday at local midnight" (SF midnight = 08:00Z in winter).
     sf = ZoneInfo("America/Los_Angeles")
     now_utc = datetime.now(timezone.utc)
-    sf_today_midnight = datetime.now(sf).replace(hour=0, minute=0, second=0, microsecond=0)
-    sf_yesterday_midnight_utc = (sf_today_midnight - timedelta(days=1)).astimezone(timezone.utc)
 
-    def iso_z(dt: datetime) -> str:
-        return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    sf_today_midnight = (
+        datetime.now(sf)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    sf_yesterday_midnight_utc = (
+        sf_today_midnight - timedelta(days=1)
+    ).astimezone(timezone.utc)
 
     where = {
         "_or": [
@@ -96,7 +113,6 @@ def fetch_graphql_data():
                 "game_id": {"_is_null": False},
                 "game": {
                     "start_time": {"_gte": iso_z(now_utc)},
-                    "drop_in_capacity": {},
                     "leagueByLeague": {
                         "organizationByOrganization": {"name": {"_eq": "San Francisco"}},
                         "sportBySport": {"name": {"_in": ["Volleyball"]}},
@@ -106,109 +122,139 @@ def fetch_graphql_data():
         ]
     }
 
-    query_body = {
+    payload = {
         "operationName": "DiscoverDaily",
-        "variables": {"limit": 15, "offset": 0, "where": where},
+        "variables": {
+            "limit": 15,
+            "offset": 0,
+            "where": where,
+        },
         "query": """
-query DiscoverDaily($where: discover_daily_bool_exp!, $limit: Int = 15, $offset: Int = 0) {
+query DiscoverDaily($where: discover_daily_bool_exp!, $limit: Int, $offset: Int) {
   discover_daily(
     where: $where
-    order_by: [{event_start_date: asc}, {event_start_time_str: asc}, {event_end_time_str: asc}, {_id: asc}]
+    order_by: [
+      {event_start_date: asc},
+      {event_start_time_str: asc},
+      {_id: asc}
+    ]
     limit: $limit
     offset: $offset
   ) {
     _id
     game_id
+    league_id
+    event_start_date
+    event_start_time_str
+    event_end_time_str
     game {
       start_time
       end_time
       venueByVenue { shorthand_name formatted_address }
       drop_in_capacity { total_available_spots }
-      leagueByLeague { program_type sportBySport { name } }
+      leagueByLeague { sportBySport { name } }
     }
-    league_id
     league {
       name
       display_name
-      program_type
       start_date
       venueByVenue { shorthand_name formatted_address }
       sportBySport { name }
     }
-    event_start_date
-    event_start_time_str
-    event_end_time_str
   }
-  discover_daily_aggregate(where: $where) { aggregate { count } }
 }
-        """,
+""",
     }
+
     try:
-        response = requests.post(API_URL, headers=headers, json=query_body, timeout=20)
-        if response.status_code == 200:
-            payload = response.json()
-            items = payload.get("data", {}).get("discover_daily", [])
-            return "SUCCESS", items
-        return ("BLOCKED" if response.status_code in [403, 429] else "ERROR"), response.status_code
+        r = requests.post(API_URL, headers=headers, json=payload, timeout=25)
+        if r.status_code == 200:
+            data = r.json().get("data", {}).get("discover_daily", [])
+            return "SUCCESS", data
+        elif r.status_code in (403, 429):
+            return "BLOCKED", r.status_code
+        else:
+            return "ERROR", f"{r.status_code}: {r.text[:200]}"
     except Exception as e:
         return "ERROR", str(e)
 
+# ---------------- MAIN ----------------
+
 def main():
-    if not os.path.exists(CACHE_FILE):
-        known_ids = []
+    if not NTFY_TOPIC:
+        print("❌ NTFY_TOPIC not set")
+        return
+
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                known_ids = set(json.load(f) or [])
+        except Exception:
+            known_ids = set()
     else:
-        with open(CACHE_FILE, 'r') as f:
-            try:
-                known_ids = json.load(f)
-            except:
-                known_ids = []
+        known_ids = set()
+
+    seen_before = len(known_ids)
 
     status, result = fetch_graphql_data()
 
     if status == "BLOCKED":
-        send_ntfy(f"Monitor blocked (Status {result})", title="⚠️ Volo Blocked", priority="high", tags="warning")
+        send_ntfy(
+            f"Volo blocked this run ({result})\n{DISCOVER_URL}",
+            title="⚠️ Volo Blocked",
+            priority="high",
+            tags="warning",
+        )
         return
 
-    if status == "SUCCESS":
-        new_games = []
-        for item in result:
-            gid = get_game_id(item)
-            if gid not in known_ids:
-                # Normalize into human-friendly fields.
-                if item.get("game"):
-                    g = item["game"] or {}
-                    venue = (g.get("venueByVenue") or {})
-                    sport = (((g.get("leagueByLeague") or {}).get("sportBySport") or {}).get("name")) or "Volleyball"
-                    spots = ((g.get("drop_in_capacity") or {}).get("total_available_spots"))
-                    start = g.get("start_time")
-                    title = f"{sport} (Drop-in)"
-                else:
-                    l = item.get("league") or {}
-                    venue = (l.get("venueByVenue") or {})
-                    sport = ((l.get("sportBySport") or {}).get("name")) or "Volleyball"
-                    spots = None
-                    start = l.get("start_date")
-                    title = l.get("display_name") or l.get("name") or f"{sport} League"
+    if status != "SUCCESS":
+        send_ntfy(
+            f"Volo error:\n{result}",
+            title="⚠️ Volo Error",
+            priority="high",
+            tags="warning",
+        )
+        print(f"❌ Error: {result}")
+        return
 
-                link = DISCOVER_URL
-                location = venue.get("shorthand_name") or "(location unknown)"
-                address = venue.get("formatted_address")
-                when = start or f"{item.get('event_start_date')} {item.get('event_start_time_str')}"
+    new_count = 0
 
-                msg = f"🏐 {title}\n🕒 {when}\n📍 {location}\n👥 Spots: {spots if spots is not None else 'see listing'}"
-                if address:
-                    msg += f"\n🗺️ {address}"
-                msg += f"\n🔗 {link}\nID: {gid}"
-                send_ntfy(msg, title="New Volo Volleyball!")
-                known_ids.append(gid)
-                new_games.append(gid)
-        
-        if new_games:
-            with open(CACHE_FILE, 'w') as f:
-                json.dump(known_ids, f)
-            print(f"✅ Notified for {len(new_games)} new games.")
+    for item in result:
+        gid = get_game_id(item)
+        if gid in known_ids:
+            continue
+
+        if item.get("game"):
+            g = item["game"]
+            venue = g.get("venueByVenue") or {}
+            title = "Volleyball (Drop-in)"
+            when = g.get("start_time")
+            spots = (g.get("drop_in_capacity") or {}).get("total_available_spots")
         else:
-            print("🔎 0 new games found (checking against cache).")
+            l = item["league"]
+            venue = l.get("venueByVenue") or {}
+            title = l.get("display_name") or l.get("name") or "Volleyball League"
+            when = l.get("start_date")
+            spots = None
+
+        msg = (
+            f"🏐 {title}\n"
+            f"🕒 {when}\n"
+            f"📍 {venue.get('shorthand_name', 'Unknown location')}\n"
+            f"👥 Spots: {spots if spots is not None else 'See listing'}\n"
+            f"🔗 {DISCOVER_URL}\n"
+            f"ID: {gid}"
+        )
+
+        send_ntfy(msg, title="New Volo Volleyball!")
+        known_ids.add(gid)
+        new_count += 1
+
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(sorted(known_ids), f)
+
+    print(f"✅ Fetched {len(result)} items")
+    print(f"✅ Cache had {seen_before}, now {len(known_ids)} (added {new_count})")
 
 if __name__ == "__main__":
     main()
