@@ -1,1 +1,39 @@
+name: Volo Volleyball Monitor
 
+on:
+  schedule:
+    # Runs every 30 minutes
+    - cron: '*/30 * * * *'
+  workflow_dispatch: # Allows you to click "Run workflow" manually for testing
+
+jobs:
+  check-volo:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Important: This allows the bot to save the "memory" file
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install --with-deps chromium
+
+      - name: Run Monitor
+        run: python volo_monitor.py
+
+      - name: Save Progress
+        # This step saves 'known_games.json' back to your repo so you don't get 
+        # duplicate notifications every 30 minutes.
+        run: |
+          git config --global user.name 'VoloBot'
+          git config --global user.email 'bot@github.com'
+          git add known_games.json
+          git commit -m "Update known games cache" || echo "No new games found"
+          git push
