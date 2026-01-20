@@ -3,13 +3,12 @@ import json
 import hashlib
 import requests
 import time
+from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
 NTFY_TOPIC = "davallree-sf-volleyball-alerts"
 CACHE_FILE = "known_games.json"
-
-# We use the Next.js internal data URL which is often less protected than the API
-DATA_URL = "https://www.volosports.com/_next/data/latest/discover.json"
+TARGET_URL = "https://www.volosports.com/discover?cityName=San%20Francisco&sportNames%5B0%5D=Volleyball"
 
 def send_notification(game):
     try:
@@ -32,50 +31,59 @@ def get_game_id(game):
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def scrape_volo():
-    # Constructing the exact query params used by the frontend
-    params = {
-        "cityName": "San Francisco",
-        "subView": "DAILY",
-        "view": "SPORTS",
-        "sportNames[0]": "Volleyball"
-    }
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "x-nextjs-data": "1"  # Tells the server to return JSON, not HTML
-    }
-
-    for attempt in range(3):
-        try:
-            print(f"🚀 Fetching Next.js data (Attempt {attempt + 1})...")
-            response = requests.get(DATA_URL, params=params, headers=headers, timeout=20)
-            
-            if response.status_code == 200:
-                data = response.json()
-                # Next.js structure usually puts data in 'pageProps'
-                items = data.get('pageProps', {}).get('initialPrograms', {}).get('items', [])
-                
-                # Fallback check for different JSON structure
-                if not items:
-                    items = data.get('data', {}).get('searchPrograms', {}).get('items', [])
-
-                return [
-                    {
-                        "title": item.get('name'),
-                        "details": f"{item.get('locationName')} | {item.get('startTime')}",
-                        "slug": item.get('slug')
-                    }
-                    for item in items if item.get('slug')
-                ]
-            else:
-                print(f"⚠️ Status {response.status_code}. The site might be blocking the request.")
-        except Exception as e:
-            print(f"⚠️ Request failed: {e}")
+    games = []
+    with sync_playwright() as p:
+        print("🚀 Launching stealth browser...")
+        browser = p.chromium.launch(headless=True)
         
-        time.sleep(5)
+        # Create context with a realistic user agent and window size
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 800}
+        )
+        
+        page = context.new_page()
+        
+        try:
+            # Navigate and wait for the page to actually load content
+            page.goto(TARGET_URL, wait_until="networkidle", timeout=60000)
+            
+            # Additional wait for React hydration
+            page.wait_for_timeout(5000)
+            
+            # Scrape program cards based on the structure in your debug file
+            # We target elements containing "ProgramCard" or similar listing structures
+            cards = page.query_selector_all('div[class*="ProgramCard"], div[class*="listing"]')
+            print(f"📡 Found {len(cards)} potential listings.")
 
-    return []
+            for card in cards:
+                try:
+                    title_el = card.query_selector('h3') or card.query_selector('div[class*="title"]')
+                    link_el = card.query_selector('a')
+                    
+                    if title_el and link_el:
+                        title = title_el.inner_text().strip()
+                        href = link_el.get_attribute('href') or ""
+                        slug = href.split('/')[-1]
+                        
+                        # Grab descriptive text (location/date)
+                        full_text = card.inner_text()
+                        details = full_text.replace(title, "").strip().split('\n')[0]
+                        
+                        games.append({
+                            "title": title,
+                            "details": details,
+                            "slug": slug
+                        })
+                except:
+                    continue
+
+        except Exception as e:
+            print(f"❌ Scrape failed: {e}")
+        finally:
+            browser.close()
+            
+    return games
 
 def main():
     if not os.path.exists(CACHE_FILE):
@@ -85,7 +93,7 @@ def main():
         known_ids = json.load(f)
     
     current_games = scrape_volo()
-    print(f"🔎 Found {len(current_games)} volleyball listings.")
+    print(f"🔎 Extracted {len(current_games)} items.")
     
     new_found = False
     for game in current_games:
