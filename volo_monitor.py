@@ -3,7 +3,7 @@ import json
 import hashlib
 import requests
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 # --- CONFIGURATION ---
 NTFY_TOPIC = "davallree-sf-volleyball-alerts"
@@ -35,6 +35,10 @@ def fetch_graphql_data():
         "Referer": "https://www.volosports.com/",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+    
+    # FIX: Use timezone-aware UTC now to remove DeprecationWarning
+    current_time_iso = datetime.now(timezone.utc).isoformat()
+
     query_body = {
         "operationName": "DiscoverDaily",
         "variables": {
@@ -43,7 +47,7 @@ def fetch_graphql_data():
                 "sport": {"_eq": "Volleyball"},
                 "status": {"_eq": "registration_open"},
                 "available_spots": {"_gt": 0},
-                "start_time": {"_gte": datetime.utcnow().isoformat()}
+                "start_time": {"_gte": current_time_iso}
             }
         },
         "query": """
@@ -73,7 +77,10 @@ def main():
         known_ids = []
     else:
         with open(CACHE_FILE, 'r') as f:
-            known_ids = json.load(f)
+            try:
+                known_ids = json.load(f)
+            except:
+                known_ids = []
 
     status, result = fetch_graphql_data()
 
@@ -95,6 +102,9 @@ def main():
         if new_games:
             with open(CACHE_FILE, 'w') as f:
                 json.dump(known_ids, f)
+            print(f"✅ Notified for {len(new_games)} new games.")
+        else:
+            print("🔎 0 new games found (checking against cache).")
 
 if __name__ == "__main__":
     main()
