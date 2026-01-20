@@ -12,7 +12,7 @@ NTFY_TOPIC = "davallree-sf-volleyball-alerts"
 def send_notification(game):
     try:
         message = f"🏐 {game['title']}\n📅 {game['details']}\n🔗 https://www.volosports.com{game['link']}"
-        requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=message.encode('utf-8'), 
+        requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=message.encode('utf-8'),
                       headers={"Title": "New Volo Game Found!", "Priority": "high", "Tags": "volleyball,sf"})
         print(f"✅ Notification sent: {game['title']}")
     except Exception as e:
@@ -23,74 +23,59 @@ def get_game_id(game):
 
 def scrape_volo():
     games = []
+    
     with sync_playwright() as p:
-        # Launch with 'stealth' settings to bypass bot detection
         browser = p.chromium.launch(headless=True)
+        # Use a very generic, high-trust User Agent
         context = browser.new_context(
-            viewport={'width': 1280, 'height': 1200},
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        
-        # This script prevents 'navigator.webdriver' from being true
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
         page = context.new_page()
-        print(f"🚀 Visiting Volo SF...")
+
+        # INTERNAL DATA CAPTURE
+        # We listen for the specific background request Volo makes to load the list
+        def handle_response(response):
+            if "graphql" in response.url or "discover" in response.url:
+                try:
+                    data = response.json()
+                    # Navigating Volo's JSON structure for 'program' listings
+                    items = data.get('data', {}).get('searchPrograms', {}).get('items', [])
+                    for item in items:
+                        if "volleyball" in item.get('sportName', '').lower():
+                            games.append({
+                                "title": item.get('name', 'Volleyball Game'),
+                                "details": f"{item.get('locationName', 'SF')} | {item.get('startTime', '')}",
+                                "link": f"/event/{item.get('slug', '')}"
+                            })
+                except:
+                    pass
+
+        page.on("response", handle_response)
+
+        print("🚀 Requesting data from Volo API...")
+        # Navigate to the page to trigger the background API calls
+        page.goto(VOLO_URL, wait_until="networkidle", timeout=60000)
         
-        # Navigate and wait for the page to actually settle
-        page.goto(VOLO_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(15000)
-
-        # Check if we were blocked by reCAPTCHA
-        if page.query_selector('iframe[title*="reCAPTCHA"]') or "captcha" in page.content().lower():
-            print("🚫 BLOCKED: The site is showing a bot-check (reCAPTCHA).")
-            return []
-
-        # Volo uses a specific structure for their "Cards"
-        # We look for divs that have an ARIA label containing sport info
-        cards = page.query_selector_all('div[aria-label*="Volleyball"]')
-        
-        # If no ARIA cards, try finding links that look like events
-        if not cards:
-            cards = page.query_selector_all('a[href*="/event/"]')
-
-        print(f"📊 Found {len(cards)} potential card elements.")
-
-        for card in cards:
-            try:
-                # Find the link inside or on the card
-                href = card.get_attribute('href') or card.query_selector('a').get_attribute('href')
-                
-                # Get all text from the card
-                text = card.inner_text().strip()
-                if not text or len(text) < 10:
-                    continue
-                
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
-                # Skip if it's just a generic header
-                if len(lines) < 2: continue
-
-                title = lines[0] if lines[0].upper() != "VOLLEYBALL" else lines[1]
-                details = " | ".join(lines[1:5])
-
-                if href and "/event/" in href:
-                    if not any(g['link'] == href for g in games):
-                        games.append({"title": title, "details": details, "link": href})
-            except:
-                continue
-                
+        # Give it a bit extra time to finish background API calls
+        page.wait_for_timeout(5000)
         browser.close()
+
     return games
 
 def main():
     if not os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, 'w') as f: json.dump([], f)
-    
     with open(CACHE_FILE, 'r') as f:
         known_ids = json.load(f)
     
     current_games = scrape_volo()
-    print(f"🔎 Final Count: {len(current_games)} games.")
+    
+    # FALLBACK: If API interception failed, try a final forced-wait scan
+    if not current_games:
+        print("⚠️ API capture empty, likely blocked. No games found.")
+        return
+
+    print(f"🔎 Found {len(current_games)} games via API.")
     
     new_found = False
     for game in current_games:
@@ -104,7 +89,7 @@ def main():
         with open(CACHE_FILE, 'w') as f: json.dump(known_ids, f)
         print("✅ Memory updated.")
     else:
-        print("😴 Nothing new.")
+        print("😴 No new updates.")
 
 if __name__ == "__main__":
     main()
