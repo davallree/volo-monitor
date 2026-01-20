@@ -4,45 +4,46 @@ on:
   schedule:
     # Runs every 30 minutes
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Allows you to click "Run workflow" manually for testing
+  workflow_dispatch: # Allows manual trigger
 
 jobs:
-  check-volo:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # Important: This allows the bot to save the "memory" file
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
-          pip install playwright requests
-          playwright install --with-deps chromium
+          pip install seleniumbase requests
 
-      - name: Run Monitor
-        run: python volo_monitor.py
-
-      - name: Save Progress
-        # This step saves 'known_games.json' back to your repo so you don't get 
-        # duplicate notifications every 30 minutes.
+      - name: Install Chrome and Driver
         run: |
-          git config --global user.name 'VoloBot'
-          git config --global user.email 'bot@github.com'
+          # SeleniumBase handles the binary setup automatically
+          seleniumbase install chromedriver
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable xvfb
+
+      - name: Run Volo Monitor
+        env:
+          # If you eventually use secrets for ntfy or other services
+          PYTHONUNBUFFERED: 1
+        run: |
+          # We run through xvfb to simulate a headed browser in a headless environment
+          # This is the most effective way to bypass Cloudflare
+          xvfb-run --auto-servernum python volo_monitor.py
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add known_games.json
-          git commit -m "Update known games cache" || echo "No new games found"
+          git commit -m "Update known games cache [skip ci]" || echo "No changes to commit"
           git push
-          
-      - name: Upload Debug Files
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-results
-          path: |
-            debug_view.png
-            debug_page.html
