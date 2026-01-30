@@ -27,11 +27,11 @@ def send_ntfy(message, title="Volo Monitor", priority="default", tags="volleybal
             headers={"Title": title, "Priority": priority, "Tags": tags},
             timeout=10,
         )
-        print(f"📣 ntfy status: {r.status_code}")
+        print(f" ntfy status: {r.status_code}")
         if r.status_code >= 400:
-            print(f"📣 ntfy error body: {r.text[:200]}")
+            print(f" ntfy error body: {r.text[:200]}")
     except Exception as e:
-        print(f"❌ ntfy exception: {e}")
+        print(f"ntfy exception: {e}")
 
 # ---------------- HELPERS ----------------
 
@@ -74,7 +74,7 @@ def fetch_graphql_data():
                     extra.pop(k, None)
             headers.update(extra)
         except Exception as e:
-            print(f"⚠️ Failed to parse VOLO_SESSION_HEADERS: {e}")
+            print(f" Failed to parse VOLO_SESSION_HEADERS: {e}")
 
     sf = ZoneInfo("America/Los_Angeles")
     now_utc = datetime.now(timezone.utc)
@@ -162,7 +162,7 @@ query DiscoverDaily($where: discover_daily_bool_exp!, $limit: Int, $offset: Int)
 
 def main():
     if not NTFY_TOPIC:
-        print("❌ NTFY_TOPIC not set")
+        print("NTFY_TOPIC not set")
         raise SystemExit(2)
 
     # Load cache
@@ -182,7 +182,7 @@ def main():
     if status == "BLOCKED":
         send_ntfy(
             f"Volo blocked this run ({result})\n{DISCOVER_URL}",
-            title="⚠️ Volo Blocked",
+            title="Volo Blocked",
             priority="high",
             tags="warning",
         )
@@ -191,11 +191,11 @@ def main():
     if status != "SUCCESS":
         send_ntfy(
             f"Volo error:\n{result}",
-            title="⚠️ Volo Error",
+            title="Volo Error",
             priority="high",
             tags="warning",
         )
-        print(f"❌ Error: {result}")
+        print(f"Error: {result}")
         raise SystemExit(1)
 
     new_count = 0
@@ -219,11 +219,11 @@ def main():
             spots = None
 
         msg = (
-            f"🏐 {title}\n"
-            f"🕒 {when}\n"
-            f"📍 {venue.get('shorthand_name', 'Unknown location')}\n"
-            f"👥 Spots: {spots if spots is not None else 'See listing'}\n"
-            f"🔗 {DISCOVER_URL}\n"
+            f"{title}\n"
+            f"{when}\n"
+            f"{venue.get('shorthand_name', 'Unknown location')}\n"
+            f"Spots: {spots if spots is not None else 'See listing'}\n"
+            f"{DISCOVER_URL}\n"
             f"ID: {gid}"
         )
 
@@ -235,8 +235,8 @@ def main():
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(known_ids), f)
 
-    print(f"✅ Fetched {len(result)} items")
-    print(f"✅ Cache had {seen_before}, now {len(known_ids)} (added {new_count})")
+    print(f"Fetched {len(result)} items")
+    print(f"Cache had {seen_before}, now {len(known_ids)} (added {new_count})")
 
 if __name__ == "__main__":
     main()
