@@ -56,11 +56,7 @@ def fetch_graphql_data():
         "Content-Type": "application/json",
         "Origin": "https://www.volosports.com",
         "Referer": "https://www.volosports.com/",
-        "User-Agent": os.getenv(
-            "VOLO_USER_AGENT",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": os.getenv("VOLO_USER_AGENT") or "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         ),
         "Accept": "*/*",
     }
